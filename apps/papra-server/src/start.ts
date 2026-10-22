@@ -26,6 +26,7 @@ import { createWebhookRepository } from './modules/webhooks/webhooks.repository'
 import { createWebhookTriggerServices } from './modules/webhooks/webhooks.trigger.services';
 import { createPlanEntitlementDefinitionRegistry } from './modules/plan-entitlements/plan-entitlements.registry';
 import { createAiServices } from './modules/ai/ai.services';
+import type { ChatDependencies } from './modules/ai/ai.chat.usecases';
 import { createAiCreditsRepository } from './modules/ai-credits/ai-credits.repository';
 import { createPlansRepository } from './modules/plans/plans.repository';
 import { createPlanEntitlementsRepository } from './modules/plan-entitlements/plan-entitlements.repository';
@@ -82,14 +83,22 @@ async function buildServices({ config }: { config: Config }): Promise<GlobalDepe
   });
   const kvStore = buildKvStore({ config, db });
   const planEntitlementDefinitionRegistry = createPlanEntitlementDefinitionRegistry({ config });
-  const aiServices = createAiServices({
+  const aiCreditsRepository = createAiCreditsRepository({ db });
+  const plansRepository = createPlansRepository({ config });
+  const planEntitlementsRepository = createPlanEntitlementsRepository({ db });
+  const subscriptionsRepository = createSubscriptionsRepository({ db });
+  // Single bundle of the dependencies every model call needs (model resolution,
+  // credits, entitlements). Shared by aiServices and threaded to background
+  // tasks that call models outside the request lifecycle.
+  const chatDependencies: ChatDependencies = {
     config,
-    aiCreditsRepository: createAiCreditsRepository({ db }),
+    aiCreditsRepository,
+    plansRepository,
     planEntitlementDefinitionRegistry,
-    plansRepository: createPlansRepository({ config }),
-    planEntitlementsRepository: createPlanEntitlementsRepository({ db }),
-    subscriptionsRepository: createSubscriptionsRepository({ db }),
-  });
+    planEntitlementsRepository,
+    subscriptionsRepository,
+  };
+  const aiServices = createAiServices({ chatDependencies });
 
   // --- Services initialization
   await taskServices.initialize();
@@ -119,6 +128,7 @@ async function buildServices({ config }: { config: Config }): Promise<GlobalDepe
     kvStore,
     planEntitlementDefinitionRegistry,
     aiServices,
+    chatDependencies,
   };
 }
 

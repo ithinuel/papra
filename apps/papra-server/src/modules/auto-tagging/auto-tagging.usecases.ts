@@ -19,6 +19,7 @@ import {
   getTagsActions,
 } from './auto-tagging.models';
 import { ensureModelId } from '../ai/ai.models';
+import { AI_CREATED_TAG_COLOR } from '../tags/tags.constants';
 
 export function buildPromptForAutoTagging({ aiServices }: { aiServices: AiServices }) {
   return async ({
@@ -82,9 +83,9 @@ export function buildApplyAutoTaggingActions({
         limit(async () =>
           createTag({
             organizationId,
-            color: '#CCCCCC',
+            color: AI_CREATED_TAG_COLOR,
             name,
-            description,
+            description: description ?? undefined,
           }),
         ),
       ),

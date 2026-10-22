@@ -5,9 +5,11 @@ import type { Logger } from '../shared/logger/logger';
 import type { WebhookTriggerServices } from '../webhooks/webhooks.trigger.services';
 import type { TagsRepository } from './tags.repository';
 import type { Tag } from './tags.types';
+import pLimit from 'p-limit';
 import { deferRegisterDocumentActivityLog } from '../documents/document-activity/document-activity.usecases';
 import { createLogger } from '../shared/logger/logger';
 import { createOrganizationTagLimitReachedError, createTagNotFoundError } from './tags.errors';
+import { AI_CREATED_TAG_COLOR } from './tags.constants';
 
 export async function checkIfOrganizationCanCreateNewTag({
   organizationId,
@@ -158,4 +160,67 @@ export async function applyTagsToDocuments({
   );
 
   return { insertedPairs, removedPairs };
+}
+
+/**
+ * Applies the outcome of an AI tag suggestion to documents: creates the
+ * suggested tags (best-effort — the organization tag limit or a concurrent
+ * creation race must not fail the whole operation) and attaches both the new
+ * tags and the already-existing ones in a single
+ * {@link applyTagsToDocuments} call, so webhooks and activity events are
+ * emitted once.
+ */
+export async function createTagsAndApplyToDocuments({
+  documentIds,
+  organizationId,
+  tagIdsToAdd,
+  tagsToCreate,
+  config,
+  tagsRepository,
+  eventServices,
+  logger = createLogger({ namespace: 'tags.usecases' }),
+}: {
+  documentIds: string[];
+  organizationId: string;
+  tagIdsToAdd: string[];
+  tagsToCreate: { name: string; description?: string | null }[];
+  config: Config;
+  tagsRepository: TagsRepository;
+  eventServices: EventServices;
+  logger?: Logger;
+}) {
+  const limit = pLimit(5);
+
+  // TODO: introduce a createTags method with a new checkIfOrganizationCanCreateNewTag
+  const createdTagsResults = await Promise.allSettled(
+    tagsToCreate.map(async ({ name, description }) =>
+      limit(async () =>
+        createTag({
+          organizationId,
+          color: AI_CREATED_TAG_COLOR,
+          name,
+          description: description ?? undefined,
+          config,
+          tagsRepository,
+        }),
+      ),
+    ),
+  );
+
+  const createdTags = createdTagsResults
+    .filter(
+      (result): result is PromiseFulfilledResult<{ tag: Tag }> => result.status === 'fulfilled',
+    )
+    .map((result) => result.value.tag);
+
+  return applyTagsToDocuments({
+    documentIds,
+    addTagIds: [...tagIdsToAdd, ...createdTags.map((tag) => tag.id)],
+    removeTagIds: [],
+    organizationId,
+    userId: undefined,
+    tagsRepository,
+    eventServices,
+    logger,
+  });
 }

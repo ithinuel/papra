@@ -16,6 +16,7 @@ import type { EventServices } from './events/events.services';
 import type { ShutdownServices } from './graceful-shutdown/graceful-shutdown.services';
 import type { PlanEntitlementDefinitionRegistry } from '../plan-entitlements/plan-entitlements.registry';
 import type { AiServices } from '../ai/ai.services';
+import type { ChatDependencies } from '../ai/ai.chat.usecases';
 import type { ResolveAuthenticationContext } from '../api/api.authentication';
 
 export type ServerInstanceGenerics = {
@@ -47,6 +48,7 @@ export type GlobalDependencies = {
   planEntitlementDefinitionRegistry: PlanEntitlementDefinitionRegistry;
   kvStore: KvStore;
   aiServices: AiServices;
+  chatDependencies: ChatDependencies;
 };
 
 export type RouteDefinitionContext = { app: ServerInstance } & GlobalDependencies;

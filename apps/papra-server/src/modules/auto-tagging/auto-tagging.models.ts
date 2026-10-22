@@ -53,7 +53,7 @@ export function buildAutoTaggingUserPrompt({
 
 export type AutoTaggingResponse = {
   existingTags?: string[];
-  newTags?: { name: string; description?: string }[];
+  newTags?: { name: string; description?: string | null }[];
 };
 
 export function buildAutoTaggingSchema({
@@ -65,16 +65,18 @@ export function buildAutoTaggingSchema({
 }): v.GenericSchema<AutoTaggingResponse> {
   const hasExistingTags = existingTags.length > 0;
 
+  const newTagSchema = v.object({ name: v.string(), description: v.nullish(v.string()) });
+
   if (canCreateNewTags && hasExistingTags) {
     return v.object({
       existingTags: v.array(v.picklist(existingTags.map((tag) => tag.name))),
-      newTags: v.array(v.object({ name: v.string(), description: v.optional(v.string()) })),
+      newTags: v.array(newTagSchema),
     });
   }
 
   if (canCreateNewTags && !hasExistingTags) {
     return v.object({
-      newTags: v.array(v.object({ name: v.string(), description: v.optional(v.string()) })),
+      newTags: v.array(newTagSchema),
     });
   }
 
@@ -85,7 +87,7 @@ export function buildAutoTaggingSchema({
 
 export type AutoTaggingActions = {
   tagIdsToAdd: string[];
-  tagsToCreate: { name: string; description?: string }[];
+  tagsToCreate: { name: string; description?: string | null }[];
 };
 
 export function getTagsActions({

@@ -41,14 +41,16 @@ export async function runAutoTaggingTestSuite({
   const { db } = await createInMemoryDatabase();
 
   const aiServices = createAiServices({
-    config,
+    chatDependencies: {
+      config,
+      aiCreditsRepository: createAiCreditsRepository({ db }),
+      planEntitlementsRepository: createPlanEntitlementsRepository({ db }),
+      plansRepository: createPlansRepository({ config }),
+      subscriptionsRepository: createSubscriptionsRepository({ db }),
+      planEntitlementDefinitionRegistry: createPlanEntitlementDefinitionRegistry({ config }),
+    },
     // oxlint-disable-next-line no-console
     logger: { error: console.error } as Logger,
-    aiCreditsRepository: createAiCreditsRepository({ db }),
-    planEntitlementsRepository: createPlanEntitlementsRepository({ db }),
-    plansRepository: createPlansRepository({ config }),
-    subscriptionsRepository: createSubscriptionsRepository({ db }),
-    planEntitlementDefinitionRegistry: createPlanEntitlementDefinitionRegistry({ config }),
   });
 
   const promptForAutoTagging = buildPromptForAutoTagging({ aiServices });
