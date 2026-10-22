@@ -25,6 +25,7 @@ COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY packages/lecture/package.json ./packages/lecture/package.json
 COPY packages/webhooks/package.json ./packages/webhooks/package.json
 COPY packages/search-parser/package.json ./packages/search-parser/package.json
+COPY packages/pdfjs-node/package.json ./packages/pdfjs-node/package.json
 COPY packages/std/package.json ./packages/std/package.json
 COPY apps/papra-server/package.json ./apps/papra-server/package.json
 
@@ -33,6 +34,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY packages/lecture ./packages/lecture
 COPY packages/webhooks ./packages/webhooks
 COPY packages/search-parser ./packages/search-parser
+COPY packages/pdfjs-node ./packages/pdfjs-node
 COPY packages/std ./packages/std
 COPY apps/papra-server ./apps/papra-server
 

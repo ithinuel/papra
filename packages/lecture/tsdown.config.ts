@@ -5,6 +5,6 @@ export default defineConfig({
   dts: true,
   exports: true,
   deps: {
-    alwaysBundle: ['@papra/std'],
+    alwaysBundle: ['@papra/pdfjs-node', '@papra/std'],
   },
 });

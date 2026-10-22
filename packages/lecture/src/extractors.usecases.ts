@@ -54,6 +54,13 @@ export async function extractText({
       subExtractorsUsed: subExtractorsUsed ?? [],
     };
   } catch (error) {
+    logger?.error(
+      {
+        error:
+          error instanceof Error ? { message: error.message, stack: error.stack } : String(error),
+      },
+      'Text extraction failed',
+    );
     return {
       error: error as Error,
       extractorName,
@@ -66,6 +73,7 @@ export async function extractText({
 
 export async function extractTextFromBlob({
   blob,
+  logger,
   ...rest
 }: {
   blob: Blob;
@@ -75,16 +83,17 @@ export async function extractTextFromBlob({
   const arrayBuffer = await blob.arrayBuffer();
   const mimeType = blob.type;
 
-  return extractText({ arrayBuffer, mimeType, ...rest });
+  return extractText({ arrayBuffer, mimeType, logger, ...rest });
 }
 
 export async function extractTextFromFile({
   file,
+  logger,
   ...rest
 }: {
   file: File;
   config?: PartialExtractorConfig;
   logger?: Logger;
 }) {
-  return extractTextFromBlob({ blob: file, ...rest });
+  return extractTextFromBlob({ blob: file, logger, ...rest });
 }

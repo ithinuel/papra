@@ -2,11 +2,17 @@ import type { PDFDocumentProxy } from 'unpdf/pdfjs';
 import type { Logger } from '../types';
 import { Buffer } from 'node:buffer';
 import canvas from '@napi-rs/canvas';
+import { configureNodePdfjs } from '@papra/pdfjs-node';
 import { extractText, getDocumentProxy, getResolvedPDFJS, renderPageAsImage } from 'unpdf';
 import { defineTextExtractor } from '../extractors.models';
 import { isValidPdfImage } from '../pdf/pdf.models';
 import { pdfImageToBuffer } from '../pdf/pdf.usecases';
 import { createTesseractExtractor } from '../tesseract/tesseract.usecases';
+
+// Inject the full pdfjs-dist build (with its JBIG2/CCITT wasm decoders) into
+// unpdf, and make pdf.js load the wasm from the filesystem.
+// See @papra/pdfjs-node for the details.
+const pdfjsOptions = await configureNodePdfjs();
 
 type OcrExtract = (imageBuffer: Buffer) => Promise<string>;
 
@@ -152,7 +158,7 @@ export const pdfExtractorDefinition = defineTextExtractor({
   name: 'pdf',
   mimeTypes: ['application/pdf'],
   extract: async ({ arrayBuffer, config, logger }) => {
-    const pdf = await getDocumentProxy(arrayBuffer);
+    const pdf = await getDocumentProxy(arrayBuffer, pdfjsOptions);
 
     const { text, pageCount } = await extractPdfText({ pdf });
 

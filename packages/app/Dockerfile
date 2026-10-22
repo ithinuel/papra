@@ -15,6 +15,7 @@ COPY packages/webhooks/package.json packages/webhooks/package.json
 COPY packages/lecture/package.json packages/lecture/package.json
 COPY packages/std/package.json packages/std/package.json
 COPY packages/search-parser/package.json packages/search-parser/package.json
+COPY packages/pdfjs-node/package.json packages/pdfjs-node/package.json
 
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
