@@ -12,7 +12,7 @@ When a document is added to Papra, its text content is extracted so it can be se
 
 ## Choosing strategies
 
-The strategies Papra uses are controlled by the `CONTENT_EXTRACTION_STRATEGY` environment variable. It accepts a single strategy name or a comma-separated list, in order of preference:
+The strategies Papra uses are controlled by the `documentContentExtraction.extractionStrategies` config option (or the `CONTENT_EXTRACTION_STRATEGY` environment variable). It accepts a single strategy name or a comma-separated list, in order of preference:
 
 ```bash
 # Single strategy (default)
@@ -40,6 +40,7 @@ Keep `internal` as the last strategy in the list. It is always available and wor
 | `docling` | Extraction via a self-hosted Docling server. | Running Docling server |
 | `azure-di` | Extraction via Azure Document Intelligence. | Azure endpoint + API key |
 | `custom-http` | Extraction via any HTTP service you provide. | Your own HTTP endpoint |
+| `ai` | Extraction via any OpenAI-compatible API (OpenAI, Ollama, LM Studio, vLLM, OpenRouter, etc.) using a vision-language model. Derives adapter config from `ai.defaultModelId`. | Vision-capable model |
 
 ### Internal
 
@@ -145,6 +146,126 @@ Papra makes a `POST` request to the configured URL with the document, then reads
 
 - `json`: the response is parsed as JSON and the text is read from the path in `CONTENT_EXTRACTION_CUSTOM_HTTP_JSON_RESPONSE_TEXT_PATH` (e.g. `text`, or `data.content`).
 - `text`: the entire response body is used as the extracted text.
+
+### AI
+
+Uses any [OpenAI-compatible API](https://github.com/openai/openapi) to extract text via multi-modal vision-language models. By default it derives the adapter and model from your [LLM configuration](/guides/llm-configuration) (`ai.defaultModelId`), so no extra setup is needed beyond configuring the AI node. Supports Ollama, LM Studio, vLLM, OpenRouter, OpenAI, Mistral, and any other OpenAI-compatible endpoint.
+
+PDFs are rasterized page-by-page and sent to the model in chunks of up to `pagesPerBatch` pages; images are sent as-is. Rendering defaults to JPEG with resolution clamps tuned for vision models, which keeps requests and vision tokens small (see [rendering and cost tuning](#rendering-and-cost-tuning)).
+
+```bash
+# Uses the model and adapter from ai.defaultModelId
+CONTENT_EXTRACTION_STRATEGY=ai,internal
+```
+
+Or override the model name per-strategy:
+
+```bash
+CONTENT_EXTRACTION_STRATEGY=ai,internal
+CONTENT_EXTRACTION_AI_MODEL_NAME=llama3.2-vision
+```
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CONTENT_EXTRACTION_AI_ADAPTER_NAME` | – | Optional adapter name override. Falls back to the adapter in `ai.defaultModelId` if not set. |
+| `CONTENT_EXTRACTION_AI_MODEL_NAME` | – | Optional model name override. Falls back to the model in `ai.defaultModelId` if not set. |
+| `CONTENT_EXTRACTION_AI_SYSTEM_PROMPT` | (built-in) | System prompt of the per-chunk calls. Supports [Nunjucks](https://mozilla.github.io/nunjucks/) templating with the document context. |
+| `CONTENT_EXTRACTION_AI_USER_PROMPT` | (built-in) | User prompt of the per-chunk calls. Supports the same templating, plus the per-batch variables `batch.pageCount` and `batch.firstPageNumber`. |
+| `CONTENT_EXTRACTION_AI_METADATA_PROMPT` | (built-in) | System prompt of the reconciling metadata call for multi-chunk PDFs. Supports the same templating (see [prompt templating](#prompt-templating)). |
+| `CONTENT_EXTRACTION_AI_PAGES_PER_BATCH` | `5` | PDF pages rasterized and sent to the model per request. Lower values shrink each request and limit which pages a truncated response can affect; higher values reduce the request count for large PDFs. PDFs only — images are always a single request. |
+| `CONTENT_EXTRACTION_AI_BATCH_CONCURRENCY` | `1` | Number of chunks sent to the model in parallel. Higher values speed up large PDFs proportionally but increase load on the model endpoint and may hit provider rate limits. |
+| `CONTENT_EXTRACTION_AI_MAX_PAGES` | `0` (no limit) | Maximum pages accepted for a single PDF. Larger PDFs are skipped by the strategy and fall through to the next one in the list. |
+| `CONTENT_EXTRACTION_AI_RENDER_IMAGE_FORMAT` | `jpeg` | Raster format sent to the model: `jpeg` (much smaller requests) or `png` (lossless). |
+| `CONTENT_EXTRACTION_AI_RENDER_MAX_LONG_EDGE` | auto | Maximum long edge in pixels per rasterized page; pages are never upscaled. Unset resolves automatically: explicit config > known model family (Claude 1568, GPT-4/o-series 2048, Gemma 3 768, Qwen-VL 1600) > fallback 1600. Set `0` to disable the clamp. |
+| `CONTENT_EXTRACTION_AI_RENDER_MAX_PIXELS` | auto | Maximum total pixel count per rasterized page, a backstop for extreme page sizes. Unset uses the 2,000,000 px fallback; `0` disables it. |
+| `CONTENT_EXTRACTION_AI_RENDER_TIMEOUT_MS` | `300000` | Deadline for a single PDF render task; a hung page fails the extraction so the document falls through to the next strategy instead of hanging forever. |
+| `CONTENT_EXTRACTION_AI_MAX_IMAGE_BYTES` | `41943040` (40 MB) | Estimated base64 payload cap for documents sent as a single payload (images, at ~1.37× their raw size). Bigger images are skipped and handled by the next strategy. PDFs are exempt: they are chunked and resolution-clamped instead. |
+| `CONTENT_EXTRACTION_AI_TEMPERATURE` | `0` | Model temperature (0–2). Lower values produce more deterministic results. |
+| `CONTENT_EXTRACTION_AI_MAX_TOKENS` | – | Maximum number of tokens in the response. When unset, the option is not sent and the model/server decides its own maximum. |
+| `CONTENT_EXTRACTION_AI_MIME_TYPES_ALLOW_LIST` | `application/pdf,image/*` | Mime types this strategy handles. See [mime type filtering](#mime-type-filtering). |
+| `CONTENT_EXTRACTION_AI_TIMEOUT_MS` | `600000` | Per-request timeout in milliseconds. |
+| `CONTENT_EXTRACTION_AI_ALLOW_NEW_TAGS` | `false` | Whether the AI model can create new tags during extraction. |
+| `CONTENT_EXTRACTION_AI_MAX_TAGS` | `5` | Maximum number of tags the AI model can assign. |
+
+The AI strategy extracts **both** the document text and structured metadata (title, tags, date, custom fields). The model response is constrained to a fixed JSON schema, and the extracted metadata is applied automatically:
+- **Title** → sets the document name, only while the document still carries its original file name (a user-renamed document keeps its name) and clamped to 255 characters
+- **Tags** → reuses existing tags, or creates new ones when `allowNewTags` is set (capped at `maxTags`)
+- **Date** → sets the document date when it is still unset and the value is parseable
+- **Fields** → matches against your organization's custom property definitions and sets values that pass their type validation
+
+#### Prompt templating
+
+All three prompts — `CONTENT_EXTRACTION_AI_SYSTEM_PROMPT`, `CONTENT_EXTRACTION_AI_USER_PROMPT`, and `CONTENT_EXTRACTION_AI_METADATA_PROMPT` — are [Nunjucks](https://mozilla.github.io/nunjucks/) templates rendered with this context object:
+
+```json
+{
+  "file": { "name": "scan-042.pdf", "mimeType": "application/pdf", "size": 245760 },
+  "document": { "id": "01JZK2M9TQ4X8V3Y6B7C9D0EFG", "name": "Scanned invoice" },
+  "tags": [
+    { "name": "Invoice", "slug": "invoice", "color": "#5B8DEF", "description": "Invoices and bills" }
+  ],
+  "customProperties": [
+    { "key": "amount", "label": "Amount", "description": "The monetary amount", "type": "number", "options": [] },
+    { "key": "vendor", "label": "Vendor", "description": null, "type": "string",
+      "options": [{ "label": "ACME", "value": "ACME" }] }
+  ],
+  "pageCount": 12,
+  "batch": { "pageCount": 5, "firstPageNumber": 6 },
+  "ai": { "canCreateNewTags": false, "maxTags": 5 }
+}
+```
+
+- **file** — the uploaded file: original name, mime type, size in bytes.
+- **document** — the stored document: id and current name.
+- **tags** — the organization's tags, rendered in deterministic order (the catalogue is sorted so every request of an organization shares a byte-identical prompt prefix, which providers can cache). `description` may be absent.
+- **customProperties** — the organization's custom-property definitions (sorted by `key`), with `options` populated for enum-like types.
+- **pageCount** — total number of pages in the document; always `1` for images.
+- **batch** — the page chunk of the per-chunk call being rendered: how many pages it contains (`batch.pageCount`) and its 1-based first page in the document (`batch.firstPageNumber`). Only meaningful in the system/user prompts — in the metadata prompt, which spans the whole document, it stays at the placeholder `{ pageCount: 1, firstPageNumber: 1 }`.
+- **ai** — the effective `allowNewTags` and `maxTags` values, so your template can adapt its instructions to what the model is actually allowed to do.
+
+Besides the standard Nunjucks filters, a `map` filter is registered: `{{ tags | map('name') | join(', ') }}`. Example user prompt for a page range:
+
+```text
+Transcribe pages {{ batch.firstPageNumber }}-{{ batch.firstPageNumber + batch.pageCount - 1 }} of {{ pageCount }}
+(document: {{ document.name }}).
+Existing tags: {{ tags | map('name') | join(', ') or 'none' }}.
+```
+
+Templates are validated at server startup: a template that throws renders aborts boot with an `Invalid AI content extraction ... prompt template` error. Note the validation renders with a fixed sample context, so expressions that only fail for *other* data shapes are not caught there — guard optional fields with `{% if %}` blocks as above.
+
+## Batching and metadata consolidation
+
+Large PDFs are split into chunks of up to `pagesPerBatch` pages. Each chunk gets one model call that asks for **both** its transcription and document metadata, keeping a single prompt shape that provider prompt-caches can reuse. Chunk prompts are rendered with the real batch context, so templates can use `{{ batch.firstPageNumber }}` and `{{ batch.pageCount }}` alongside the document-wide `{{ pageCount }}`.
+
+How the document's final metadata is decided:
+
+- **Single-chunk documents** (images, and PDFs that fit in one chunk): the chunk call's metadata is final.
+- **Multi-chunk PDFs**: the per-chunk metadata is discarded; once all chunks are back, one additional metadata-only call derives document-wide metadata from the joined transcription. The transcription is head-truncated to a budget sized from the model's advertised context window when one is known (~60k characters otherwise), since document metadata lives near the top.
+
+Chunk texts are always concatenated in page order. If the reconciling metadata call fails, the extraction still succeeds: the text is kept and the document simply gets no metadata.
+
+By default chunks run one at a time. Set `CONTENT_EXTRACTION_AI_BATCH_CONCURRENCY` to run several model calls in parallel — wall time drops roughly proportionally as long as your endpoint can serve concurrent requests (for example, Ollama only parallelizes when `OLLAMA_NUM_PARALLEL` > 1). Rendered pages are held in memory per chunk, so peak memory scales with `pagesPerBatch × batchConcurrency`, not document size. A rough worst case for a multi-chunk PDF:
+
+```text
+model calls  = ceil(pages / pagesPerBatch) + 1 (metadata reconcile)
+wall time    ≈ ceil(chunks / batchConcurrency) × CONTENT_EXTRACTION_AI_TIMEOUT_MS
+```
+
+Retries: the extraction task retries twice with exponential backoff, so a transient endpoint failure re-runs the whole extraction (idempotent) instead of leaving the document without content.
+
+## Rendering and cost tuning
+
+Vision tokens are dominated by raster size, so rendering is tuned to produce what models actually look at — no more:
+
+- Pages render at a 2× base scale, then get clamped to the long-edge (`renderMaxLongEdge`) and total-pixel (`renderMaxPixels`) caps. The value is never exceeded by upscaling small pages.
+- **Automatic per-model resolution**: unless you set the caps explicitly, Papra resolves them from the model — first by querying the endpoint for advertised model metadata (`GET /models/<id>`, Ollama `POST /api/show`), then a built-in family table (Claude 1568 px, GPT-4/o-series 2048 px, Gemma 3 768 px, Qwen-VL 1600 px), then the 1600 px / 2 MP fallback. Probing is on by default and cached per model; disable it with `AI_PROBE_MODEL_METADATA=false`. Explicit cap values are never overridden.
+- JPEG at quality 87 is the default; it dramatically shrinks requests versus PNG for scanned and rendered pages. Switch `renderImageFormat` to `png` only for lossless requirements or format-restrictive endpoints.
+- The advertised context length also sizes the metadata call's input budget; providers that report it (OpenRouter, vLLM, Ollama) get better-tuned truncation than unknown endpoints.
+
+**Prompt caching.** The built-in prompts are ordered static-instructions-first with the organization's tag/custom-property catalogue rendered last (in deterministic order). Every document and chunk of an organization therefore shares a byte-identical prompt prefix, which OpenAI and Anthropic cache automatically and vLLM caches with automatic prefix caching — the catalogue costs nothing after the first request.
+
+**Thinking tokens.** Reasoning models bill hidden thinking tokens against the completion, which can dominate extraction cost. Papra only sends standard options (temperature, max tokens), so disable thinking at the endpoint: e.g. launch vLLM with `--default-chat-template-kwargs '{"enable_thinking": false}'`, or set `PARAMETER think false` in an Ollama Modelfile. Watch for the `finish_reason: length` warning in the logs — it means a response was cut off mid-extraction; raise the endpoint's output cap or send smaller chunks.
+
 
 ## Mime type filtering
 

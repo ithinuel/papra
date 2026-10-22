@@ -1,10 +1,14 @@
 import type { PlansRepository } from '../plans/plans.repository';
+import type { CustomPropertiesRepository } from '../custom-properties/custom-properties.repository';
+import type { TagsRepository } from '../tags/tags.repository';
+import type { ExtractedDocumentMetadata } from './content-extraction/content-extraction-strategies/content-extraction-strategies.types';
 import type { StorageService } from '../storage/storage.services';
 import { describe, expect, test } from 'vitest';
 import { createInMemoryDatabase } from '../app/database/database.test-utils';
 import { createTestEventServices } from '../app/events/events.test-utils';
 import { overrideConfig } from '../config/config.test-utils';
 import { createCustomPropertiesRepository } from '../custom-properties/custom-properties.repository';
+import { createCustomPropertiesOptionsRepository } from '../custom-properties/options/custom-properties-options.repository';
 import { ORGANIZATION_ROLES } from '../organizations/organizations.constants';
 import { createOrganizationDocumentStorageLimitReachedError } from '../organizations/organizations.errors';
 import { createOrganizationsRepository } from '../organizations/organizations.repository';
@@ -15,7 +19,11 @@ import {
 } from '../shared/streams/readable-stream';
 import { createTaggingRulesRepository } from '../tagging-rules/tagging-rules.repository';
 import { createTagsRepository } from '../tags/tags.repository';
-import { documentsTagsTable } from '../tags/tags.table';
+import { documentsTagsTable, tagsTable } from '../tags/tags.table';
+import { AI_CREATED_TAG_COLOR } from '../tags/tags.constants';
+import { CUSTOM_PROPERTY_TYPES } from '../custom-properties/custom-properties.constants';
+import { documentCustomPropertyValuesTable } from '../custom-properties/custom-properties.table';
+import { customPropertySelectOptionsTable } from '../custom-properties/options/custom-properties-options.table';
 import { createInMemoryTaskServices } from '../tasks/tasks.test-utils';
 import {
   createDocumentAlreadyExistsError,
@@ -23,6 +31,7 @@ import {
 } from './documents.errors';
 import { createDocumentsRepository } from './documents.repository';
 import { documentsTable } from './documents.table';
+import { documentNameMaxLength } from './documents.constants';
 import {
   createDocumentCreationUsecase,
   enrichAndFormatDocumentsForApi,
@@ -794,6 +803,12 @@ describe('documents usecases', () => {
       });
       const taggingRulesRepository = createTaggingRulesRepository({ db });
       const tagsRepository = createTagsRepository({ db });
+      const customPropertiesRepository = {
+        getOrganizationPropertyDefinitions: async () => [],
+        getOrganizationCustomPropertyValues: async () => [],
+      } as unknown as CustomPropertiesRepository;
+      const customPropertiesOptionsRepository = createCustomPropertiesOptionsRepository({ db });
+      const organizationsRepository = createOrganizationsRepository({ db });
 
       await db.insert(documentsTable).values({
         id: 'document-1',
@@ -823,6 +838,10 @@ describe('documents usecases', () => {
         extractDocumentText: async ({ file }) => ({
           text: await collectReadableStreamToString({ stream: file.stream() }),
         }),
+        customPropertiesRepository,
+        customPropertiesOptionsRepository,
+        organizationsRepository,
+        config: overrideConfig(),
       });
 
       const documentRecords = await db.select().from(documentsTable);
@@ -859,6 +878,12 @@ describe('documents usecases', () => {
       });
       const taggingRulesRepository = createTaggingRulesRepository({ db });
       const tagsRepository = createTagsRepository({ db });
+      const customPropertiesRepository = {
+        getOrganizationPropertyDefinitions: async () => [],
+        getOrganizationCustomPropertyValues: async () => [],
+      } as unknown as CustomPropertiesRepository;
+      const customPropertiesOptionsRepository = createCustomPropertiesOptionsRepository({ db });
+      const organizationsRepository = createOrganizationsRepository({ db });
 
       await db.insert(documentsTable).values({
         id: 'document-1',
@@ -890,11 +915,321 @@ describe('documents usecases', () => {
         extractDocumentText: async ({ file }) => ({
           text: await collectReadableStreamToString({ stream: file.stream() }),
         }),
+        customPropertiesRepository,
+        customPropertiesOptionsRepository,
+        organizationsRepository,
+        config: overrideConfig(),
       });
 
       expect(eventServices.getEmittedEvents().map(({ eventName }) => eventName)).to.eql([
         'document.updated',
       ]);
+    });
+
+    describe('metadata application', () => {
+      async function setupMetadataExtraction({
+        documentName = 'file-1.txt',
+        documentOriginalName = 'file-1.txt',
+        documentDate = null,
+        config: configOverrides = {},
+      }: {
+        documentName?: string;
+        documentOriginalName?: string;
+        documentDate?: Date | null;
+        config?: Parameters<typeof overrideConfig>[0];
+      } = {}) {
+        const { db } = await createInMemoryDatabase({
+          users: [{ id: 'user-1', email: 'user-1@example.com' }],
+          organizations: [{ id: 'organization-1', name: 'Organization 1' }],
+          organizationMembers: [
+            { organizationId: 'organization-1', userId: 'user-1', role: ORGANIZATION_ROLES.OWNER },
+          ],
+        });
+
+        const config = overrideConfig({
+          organizationPlans: { isFreePlanUnlimited: true },
+          documentsStorage: { driver: 'in-memory' },
+          ...configOverrides,
+        });
+
+        const documentsRepository = createDocumentsRepository({ db });
+        const documentsStorageService = createStorageService({
+          storageConfig: config.documentsStorage,
+          encryptionOptions: {
+            isEncryptionEnabled: config.documentsStorage.encryption.isEncryptionEnabled,
+            keyEncryptionKeys: config.documentsStorage.encryption.documentKeyEncryptionKeys,
+          },
+        });
+        const taggingRulesRepository = createTaggingRulesRepository({ db });
+        const tagsRepository = createTagsRepository({ db });
+        const customPropertiesRepository = createCustomPropertiesRepository({ db });
+        const customPropertiesOptionsRepository = createCustomPropertiesOptionsRepository({ db });
+        const organizationsRepository = createOrganizationsRepository({ db });
+
+        await db.insert(documentsTable).values({
+          id: 'document-1',
+          organizationId: 'organization-1',
+          originalStorageKey: 'organization-1/originals/document-1.txt',
+          mimeType: 'text/plain',
+          name: documentName,
+          originalName: documentOriginalName,
+          originalSha256Hash: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
+          documentDate,
+        });
+
+        await documentsStorageService.saveFile({
+          fileStream: createReadableStream({ content: 'hello world' }),
+          fileName: 'file-1.txt',
+          mimeType: 'text/plain',
+          storageKey: 'organization-1/originals/document-1.txt',
+        });
+
+        const eventServices = createTestEventServices();
+
+        const run = async (
+          metadata: ExtractedDocumentMetadata,
+          overrides: { tagsRepository?: TagsRepository } = {},
+        ) =>
+          extractAndSaveDocumentFileContent({
+            documentId: 'document-1',
+            organizationId: 'organization-1',
+            documentsRepository,
+            documentsStorageService,
+            taggingRulesRepository,
+            tagsRepository: overrides.tagsRepository ?? tagsRepository,
+            eventServices,
+            extractDocumentText: async ({ file }) => ({
+              text: await collectReadableStreamToString({ stream: file.stream() }),
+              metadata,
+            }),
+            customPropertiesRepository,
+            customPropertiesOptionsRepository,
+            organizationsRepository,
+            config,
+          });
+
+        return {
+          db,
+          run,
+          eventServices,
+          tagsRepository,
+          customPropertiesRepository,
+        };
+      }
+
+      test('applies the extracted title and date on a document still carrying its original file name', async () => {
+        const { db, run } = await setupMetadataExtraction();
+
+        await run({ title: 'Invoice Acme — March', date: '2024-03-01', tags: [], fields: {} });
+
+        const [row] = await db.select().from(documentsTable);
+
+        expect(row).to.deep.include({
+          content: 'hello world',
+          name: 'Invoice Acme — March',
+          documentDate: new Date('2024-03-01'),
+        });
+      });
+
+      test('clamps the extracted title to the document name length limit', async () => {
+        const { db, run } = await setupMetadataExtraction();
+
+        await run({
+          title: 'x'.repeat(documentNameMaxLength + 50),
+          date: null,
+          tags: [],
+          fields: {},
+        });
+
+        const [row] = await db.select().from(documentsTable);
+
+        expect(row?.name).to.have.length(documentNameMaxLength);
+      });
+
+      test('a blank extracted title does not rename the document', async () => {
+        const { db, run } = await setupMetadataExtraction();
+
+        await run({ title: '   ', date: null, tags: [], fields: {} });
+
+        const [row] = await db.select().from(documentsTable);
+
+        expect(row?.name).to.eql('file-1.txt');
+      });
+
+      test('keeps a user-renamed document name and a user-set document date', async () => {
+        const userDate = new Date('2020-01-01');
+
+        const { db, run } = await setupMetadataExtraction({
+          documentName: 'my-renamed-file.txt',
+          documentOriginalName: 'file-1.txt',
+          documentDate: userDate,
+        });
+
+        await run({ title: 'Model Suggested Title', date: '2024-03-01', tags: [], fields: {} });
+
+        const [row] = await db.select().from(documentsTable);
+
+        expect(row?.name).to.eql('my-renamed-file.txt');
+        expect(row?.documentDate).to.eql(userDate);
+      });
+
+      test('an unparseable extracted date is ignored', async () => {
+        const { db, run } = await setupMetadataExtraction();
+
+        await run({ title: null, date: 'yesterday-ish', tags: [], fields: {} });
+
+        const [row] = await db.select().from(documentsTable);
+
+        expect(row?.documentDate).toBeNull();
+      });
+
+      test('applies extraction tags and creates unknown ones when allowed', async () => {
+        const { db, run, tagsRepository } = await setupMetadataExtraction({
+          config: {
+            documentContentExtraction: { strategy: { ai: { allowNewTags: true, maxTags: 5 } } },
+          },
+        });
+
+        await db.insert(tagsTable).values({
+          id: 'tag-1',
+          organizationId: 'organization-1',
+          name: 'Invoice',
+          normalizedName: 'invoice',
+          color: '#AA0000',
+        });
+
+        await run({
+          title: null,
+          date: null,
+          tags: ['invoice', { name: 'Vendor Acme', description: 'Vendor tag' }],
+          fields: {},
+        });
+
+        const { tags } = await tagsRepository.getOrganizationTags({
+          organizationId: 'organization-1',
+        });
+
+        const createdTag = tags.find((tag) => tag.name === 'Vendor Acme');
+        expect(tags.map((tag) => tag.name).sort()).to.eql(['Invoice', 'Vendor Acme']);
+        expect(createdTag).to.include({ color: AI_CREATED_TAG_COLOR, description: 'Vendor tag' });
+
+        const pairs = await db.select().from(documentsTagsTable);
+        expect(pairs.map(({ tagId }) => tagId).sort()).to.eql(
+          ['tag-1', createdTag?.id ?? ''].sort(),
+        );
+      });
+
+      test('skips unknown tags when new tag creation is not allowed', async () => {
+        const { db, run, tagsRepository } = await setupMetadataExtraction({
+          config: {
+            documentContentExtraction: { strategy: { ai: { allowNewTags: false, maxTags: 5 } } },
+          },
+        });
+
+        await run({ title: null, date: null, tags: ['Brand New'], fields: {} });
+
+        const { tags } = await tagsRepository.getOrganizationTags({
+          organizationId: 'organization-1',
+        });
+
+        expect(tags).to.eql([]);
+        const pairs = await db.select().from(documentsTagsTable);
+        expect(pairs).to.eql([]);
+      });
+
+      test('applies extraction fields to matching custom property definitions', async () => {
+        const { db, run, customPropertiesRepository } = await setupMetadataExtraction();
+
+        const { propertyDefinition: amountDefinition } =
+          await customPropertiesRepository.createPropertyDefinition({
+            definition: {
+              organizationId: 'organization-1',
+              name: 'Amount',
+              type: CUSTOM_PROPERTY_TYPES.NUMBER,
+            },
+          });
+        const { propertyDefinition: currencyDefinition } =
+          await customPropertiesRepository.createPropertyDefinition({
+            definition: {
+              organizationId: 'organization-1',
+              name: 'Currency',
+              type: CUSTOM_PROPERTY_TYPES.SELECT,
+            },
+          });
+
+        const [usdOption] = await db
+          .insert(customPropertySelectOptionsTable)
+          .values({ propertyDefinitionId: currencyDefinition.id, name: 'USD', key: 'usd' })
+          .returning();
+
+        await run({
+          title: null,
+          date: null,
+          tags: [],
+          fields: { amount: '42.5', currency: 'USD', unknown_field: 'ignored' },
+        });
+
+        const values = await db.select().from(documentCustomPropertyValuesTable);
+
+        expect(
+          values.find((value) => value.propertyDefinitionId === amountDefinition.id)?.numberValue,
+        ).to.eql(42.5);
+        expect(
+          values.find((value) => value.propertyDefinitionId === currencyDefinition.id)
+            ?.selectOptionId,
+        ).to.eql(usdOption?.id);
+        // No value is written for fields without a matching definition
+        expect(values.length).to.eql(2);
+      });
+
+      test('values rejected by the custom property type validation are skipped', async () => {
+        const { db, run, customPropertiesRepository } = await setupMetadataExtraction();
+
+        await customPropertiesRepository.createPropertyDefinition({
+          definition: {
+            organizationId: 'organization-1',
+            name: 'Notes',
+            type: CUSTOM_PROPERTY_TYPES.TEXT,
+          },
+        });
+
+        await run({
+          title: null,
+          date: null,
+          tags: [],
+          // Over the text custom property value limit (10,000 characters)
+          fields: { notes: 'x'.repeat(10_001) },
+        });
+
+        const values = await db.select().from(documentCustomPropertyValuesTable);
+
+        expect(values).to.eql([]);
+      });
+
+      test('a failure while applying metadata does not fail the extraction', async () => {
+        const ctx = await setupMetadataExtraction();
+
+        const failingTagsRepository = {
+          ...ctx.tagsRepository,
+          getOrganizationTags: async () => {
+            throw new Error('db down');
+          },
+        } as unknown as TagsRepository;
+
+        await ctx.run(
+          { title: 'Still renamed', date: null, tags: ['invoice'], fields: { amount: '1' } },
+          { tagsRepository: failingTagsRepository },
+        );
+
+        const [row] = await ctx.db.select().from(documentsTable);
+
+        // The content and the name/date update went through despite the tag failure
+        expect(row?.content).to.eql('hello world');
+        expect(row?.name).to.eql('Still renamed');
+        expect(ctx.eventServices.getEmittedEvents().map(({ eventName }) => eventName)).to.eql([
+          'document.updated',
+        ]);
+      });
     });
   });
 

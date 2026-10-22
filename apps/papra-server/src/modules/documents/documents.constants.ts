@@ -5,6 +5,11 @@ export const DOCUMENT_ID_REGEX = createPrefixedIdRegex({ prefix: DOCUMENT_ID_PRE
 
 export const ORIGINAL_DOCUMENTS_STORAGE_KEY = 'originals';
 
+// Maximum length of a document display name. Shared between the update payload
+// schema and non-route writers (e.g. extraction metadata application) so a
+// model-proposed title can never exceed it.
+export const documentNameMaxLength = 255;
+
 // Hardcoding languages list for now, as the config schema is used in the doc app, the import of @papra/lecture fucks things up at build time due to tesseract
 // but would love to use the actual list from @papra/lecture
 //

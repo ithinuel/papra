@@ -8,6 +8,7 @@ import {
 import { doclingConfig } from './content-extraction-strategies/docling/docling.content-extraction-strategy.config';
 import { azureDiConfig } from './content-extraction-strategies/azure-di/azure-di.content-extraction-strategy.config';
 import { customHttpConfig } from './content-extraction-strategies/custom-http/custom-http.content-extraction-strategy.config';
+import { aiContentExtractionConfig } from './content-extraction-strategies/ai/ai.content-extraction-strategy.config';
 
 export const documentContentExtractionConfig = {
   extractionStrategies: {
@@ -18,6 +19,7 @@ export const documentContentExtractionConfig = {
       `- \`${CONTENT_EXTRACTION_STRATEGIES.docling}\`: Uses a Docling server to extract text from documents. This strategy requires a running [Docling server](https://github.com/docling-project/docling-serve).`,
       `- \`${CONTENT_EXTRACTION_STRATEGIES.azureDi}\`: Uses the Azure Document Intelligence service to extract text from documents. This strategy requires a valid Azure Document Intelligence endpoint and API key.`,
       `- \`${CONTENT_EXTRACTION_STRATEGIES.customHttp}\`: Uses a custom HTTP service to extract text from documents. This makes a POST request to the configured URL with the document file, see \`CONTENT_EXTRACTION_CUSTOM_HTTP_\` environment variables for configuration.`,
+      `- \`${CONTENT_EXTRACTION_STRATEGIES.ai}\`: Uses an OpenAI-compatible API (e.g. OpenAI, Ollama, LM Studio, vLLM, OpenRouter) to extract text and structured metadata from documents using multi-modal vision-language models. Configured via the shared AI node (ai.defaultModelId) with optional strategy-level overrides.`,
     ].join('\n'),
     schema: v.pipe(
       v.string(),
@@ -33,5 +35,6 @@ export const documentContentExtractionConfig = {
     docling: doclingConfig,
     azureDi: azureDiConfig,
     customHttp: customHttpConfig,
+    ai: aiContentExtractionConfig,
   },
 } as const satisfies AppConfigDefinition;

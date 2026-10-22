@@ -4,13 +4,13 @@ import {
   documentSearchSortFields,
   documentSearchSortOrders,
 } from './document-search/document-search.constants';
-import { DOCUMENT_ID_REGEX, OCR_LANGUAGES } from './documents.constants';
+import { DOCUMENT_ID_REGEX, OCR_LANGUAGES, documentNameMaxLength } from './documents.constants';
 
 export const documentIdSchema = createRegexSchema(DOCUMENT_ID_REGEX);
 
 export const updateDocumentBodySchema = v.pipe(
   v.strictObject({
-    name: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(255))),
+    name: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(documentNameMaxLength))),
     content: v.optional(v.string()),
     documentDate: v.optional(v.nullable(v.pipe(v.string(), v.toDate()))),
     notes: v.optional(v.pipe(v.string(), v.maxLength(2048))),

@@ -39,6 +39,14 @@ AI_DEFAULT_MODEL=openai://gpt-4o-mini
 
 Individual features can override this. For example, auto tagging reads `AUTO_TAGGING_MODEL` first and falls back to `AI_DEFAULT_MODEL` if it is not set.
 
+## Model metadata probing
+
+When AI features need to adapt to a model's capabilities (for example, the [AI content extraction](/guides/content-extraction#rendering-and-cost-tuning) render clamps), Papra queries the configured endpoint for advertised model metadata — context length and input modalities — via `GET /models/<id>` on OpenAI-compatible APIs, Ollama's `POST /api/show`, or Anthropic's model endpoint. Probing is best-effort: a 2-second timeout, results cached per model, and a silent fallback to built-in defaults when the endpoint exposes nothing. Set `AI_PROBE_MODEL_METADATA=false` to skip the requests entirely.
+
+```bash
+AI_PROBE_MODEL_METADATA=false
+```
+
 ## Supported providers
 
 Papra ships with adapters for the most common providers, plus support for any OpenAI-compatible API. Each adapter is configured with its own environment variables.

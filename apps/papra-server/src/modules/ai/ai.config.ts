@@ -31,4 +31,10 @@ export const aiConfig = {
     env: AI_DEFAULT_MODEL_ENV_KEY,
     default: undefined,
   },
+  probeModelMetadata: {
+    doc: 'Whether papra may query the configured model endpoint (GET /models/<id> on OpenAI-compatible APIs, POST /api/show on Ollama) for advertised model metadata such as context length and vision support. On by default; results are cached per model. Set to false to rely only on explicit configuration and the built-in family table. This switch never overrides values set explicitly elsewhere.',
+    schema: v.optional(booleanishSchema),
+    env: 'AI_PROBE_MODEL_METADATA',
+    default: undefined,
+  },
 } as const satisfies AppConfigDefinition;

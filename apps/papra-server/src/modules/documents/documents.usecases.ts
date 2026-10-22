@@ -4,6 +4,8 @@ import type { Database } from '../app/database/database.types';
 import type { EventServices } from '../app/events/events.services';
 import type { Config } from '../config/config.types';
 import type { CustomPropertiesRepository } from '../custom-properties/custom-properties.repository';
+import type { CustomPropertiesOptionsRepository } from '../custom-properties/options/custom-properties-options.repository';
+import type { OrganizationsRepository } from '../organizations/organizations.repository';
 import type { PlanEntitlementsRepository } from '../plan-entitlements/plan-entitlements.repository';
 import type { PlanEntitlementDefinitionRegistry } from '../plan-entitlements/plan-entitlements.registry';
 import type { PlansRepository } from '../plans/plans.repository';
@@ -52,6 +54,12 @@ import { createDocumentsRepository } from './documents.repository';
 import { buildCreateDocumentStorageKey } from './document-storage.usecases';
 import { buildResolveStoragePatternContext } from './storage-patterns/storage-pattern.usecases';
 import type { ExtractDocumentTextUsecase } from './content-extraction/content-extraction.usecases';
+import type { TagInput } from './content-extraction/content-extraction-strategies/content-extraction-strategies.types';
+import { createTagsAndApplyToDocuments } from '../tags/tags.usecases';
+import type { CustomPropertyType } from '../custom-properties/custom-properties.constants';
+import { setDocumentCustomPropertyValue } from '../custom-properties/custom-properties.usecases';
+import { buildExtractionTagActions, parseValueForPropertyType } from './documents.metadata.models';
+import { documentNameMaxLength } from './documents.constants';
 
 type DocumentStorageContext = {
   storageKey: string;
@@ -597,6 +605,10 @@ export async function extractAndSaveDocumentFileContent({
   tagsRepository,
   eventServices,
   extractDocumentText,
+  customPropertiesRepository,
+  customPropertiesOptionsRepository,
+  organizationsRepository,
+  config,
 }: {
   documentId: string;
   organizationId: string;
@@ -606,6 +618,10 @@ export async function extractAndSaveDocumentFileContent({
   tagsRepository: TagsRepository;
   eventServices: EventServices;
   extractDocumentText: ExtractDocumentTextUsecase;
+  customPropertiesRepository: CustomPropertiesRepository;
+  customPropertiesOptionsRepository: CustomPropertiesOptionsRepository;
+  organizationsRepository: OrganizationsRepository;
+  config: Config;
 }) {
   const { document } = await documentsRepository.getDocumentById({ documentId, organizationId });
 
@@ -626,12 +642,35 @@ export async function extractAndSaveDocumentFileContent({
     mimeType: document.mimeType,
   });
 
-  const { text } = await extractDocumentText({ file });
+  const { text, metadata } = await extractDocumentText({ file });
+
+  const updateChanges: { content?: string; name?: string; documentDate?: Date | null } = {
+    content: text,
+  };
+
+  // Apply metadata from extraction (if available). The extracted title only
+  // becomes the document name while the document still carries its original
+  // file name, so re-extracting a user-renamed document never overwrites the
+  // user's choice; it is also clamped to the same length limit the update
+  // route enforces. The extracted date only fills an unset documentDate, and
+  // is validated so unparseable model output never writes an invalid date.
+  if (metadata) {
+    const extractedTitle = metadata.title?.trim();
+
+    if (extractedTitle && document.name === document.originalName) {
+      updateChanges.name = extractedTitle.slice(0, documentNameMaxLength);
+    }
+
+    const parsedDate = metadata.date ? new Date(metadata.date) : null;
+    if (parsedDate && !isNaN(parsedDate.getTime()) && isNil(document.documentDate)) {
+      updateChanges.documentDate = parsedDate;
+    }
+  }
 
   const { document: updatedDocument } = await updateDocument({
     documentId,
     organizationId,
-    changes: { content: text },
+    changes: updateChanges,
     documentsRepository,
     eventServices,
   });
@@ -641,6 +680,49 @@ export async function extractAndSaveDocumentFileContent({
     throw createDocumentNotFoundError();
   }
 
+  // Apply metadata as a best-effort enhancement: a failure to tag or set a
+  // custom property should not fail the whole extraction (the text is already
+  // saved). Tagging uses the same conventions as auto-tagging (org limit check,
+  // webhook + activity events).
+  try {
+    const tags = metadata?.tags ?? [];
+    if (tags.length > 0) {
+      await applyExtractionTags({
+        documentId,
+        organizationId,
+        tags,
+        tagsRepository,
+        eventServices,
+        config,
+      });
+    }
+
+    const fields = metadata?.fields ?? {};
+    if (Object.keys(fields).length > 0) {
+      const { propertyDefinitions: customProperties } =
+        await customPropertiesRepository.getOrganizationPropertyDefinitions({
+          organizationId,
+        });
+
+      await applyExtractionCustomProperties({
+        documentId,
+        organizationId,
+        fields,
+        customProperties,
+        customPropertiesRepository,
+        customPropertiesOptionsRepository,
+        organizationsRepository,
+        documentsRepository,
+      });
+    }
+  } catch (error) {
+    createLogger({ namespace: 'extractAndSaveDocumentFileContent' }).error(
+      { documentId, organizationId, error },
+      'Failed to apply extraction metadata (tags/custom properties)',
+    );
+  }
+
+  // Apply existing tagging rules (may add additional tags)
   await applyTaggingRules({
     document: updatedDocument,
     taggingRulesRepository,
@@ -649,6 +731,126 @@ export async function extractAndSaveDocumentFileContent({
   });
 
   return { document: updatedDocument };
+}
+
+async function applyExtractionTags({
+  documentId,
+  organizationId,
+  tags,
+  tagsRepository,
+  eventServices,
+  config,
+}: {
+  documentId: string;
+  organizationId: string;
+  tags: TagInput[];
+  tagsRepository: TagsRepository;
+  eventServices: EventServices;
+  config: Config;
+}): Promise<void> {
+  // The tag caps live on the AI strategy config; they apply to any strategy
+  // emitting metadata (the AI prompt already caps suggestions at maxTags, this
+  // re-applies the cap defensively at write time).
+  const { maxTags, allowNewTags } = config.documentContentExtraction.strategy.ai;
+
+  const { tags: existingTags } = await tagsRepository.getOrganizationTags({ organizationId });
+
+  const { tagIdsToAdd, tagsToCreate } = buildExtractionTagActions({
+    tags,
+    existingTags,
+    allowNewTags,
+    maxTags,
+  });
+
+  if (tagIdsToAdd.length === 0 && tagsToCreate.length === 0) {
+    return;
+  }
+
+  // Same convention as auto-tagging: best-effort creation of unknown tags,
+  // then a single tag application so webhook and activity events fire once.
+  await createTagsAndApplyToDocuments({
+    documentIds: [documentId],
+    organizationId,
+    tagIdsToAdd,
+    tagsToCreate,
+    config,
+    tagsRepository,
+    eventServices,
+  });
+}
+
+async function applyExtractionCustomProperties({
+  documentId,
+  organizationId,
+  fields,
+  customProperties,
+  customPropertiesRepository,
+  customPropertiesOptionsRepository,
+  organizationsRepository,
+  documentsRepository,
+  logger = createLogger({ namespace: 'extractAndSaveDocumentFileContent' }),
+}: {
+  documentId: string;
+  organizationId: string;
+  fields: Record<string, string>;
+  customProperties: Array<{
+    id: string;
+    key: string;
+    name: string;
+    type: CustomPropertyType;
+    options: Array<{ id: string; name: string; key: string }>;
+  }>;
+  customPropertiesRepository: CustomPropertiesRepository;
+  customPropertiesOptionsRepository: CustomPropertiesOptionsRepository;
+  organizationsRepository: OrganizationsRepository;
+  documentsRepository: DocumentsRepository;
+  logger?: Logger;
+}): Promise<void> {
+  // Build a lookup map for custom properties by key and name
+  const propertyMap = new Map<string, (typeof customProperties)[0]>();
+  for (const cp of customProperties) {
+    propertyMap.set(cp.key.toLowerCase(), cp);
+    propertyMap.set(cp.name.toLowerCase(), cp);
+  }
+
+  for (const [fieldKey, fieldValue] of Object.entries(fields)) {
+    const normalizedKey = fieldKey.toLowerCase().replace(/[\s_]+/g, '-');
+    const property = propertyMap.get(normalizedKey) ?? propertyMap.get(fieldKey.toLowerCase());
+
+    if (!property) {
+      continue; // No matching custom property definition
+    }
+
+    // Parse the model string into the plain value the property type expects
+    const value = parseValueForPropertyType(fieldValue, property);
+    if (value === null) {
+      continue;
+    }
+
+    // Go through the same usecase as the API route so type validation
+    // (input schemas, option/relation existence, value size limits) stays
+    // single-sourced. Each field is applied best-effort: one invalid value
+    // must not prevent the remaining fields from being set.
+    const [, error] = await safely(async () =>
+      setDocumentCustomPropertyValue({
+        documentId,
+        organizationId,
+        propertyDefinitionId: property.id,
+        value,
+        customPropertiesRepository,
+        customPropertiesOptionsRepository,
+        organizationsRepository,
+        documentsRepository,
+      }),
+    );
+
+    if (error) {
+      logger.warn(
+        { documentId, organizationId, fieldKey, propertyDefinitionId: property.id, error },
+        'Skipped extraction custom property value (validation failed)',
+      );
+    }
+  }
 }
 
 export async function trashDocument({
